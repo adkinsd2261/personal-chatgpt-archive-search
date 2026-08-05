@@ -1,0 +1,26 @@
+# Private source and generated archive data
+raw/
+index/
+reports/
+manifests/*.json
+
+# Personal canonical artifacts are local unless explicitly allowlisted
+canon/*
+!canon/README.md
+
+# Local evaluations may contain private archive queries and provenance
+evals/*.local.json
+evals/results/
+
+# Environments, caches, logs, and secrets
+.venv/
+.cache/
+.env
+.env.*
+!.env.example
+*.log
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/

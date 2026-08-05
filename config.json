@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "raw_export_dir": "raw/chatgpt-export",
+  "database": "index/archive.sqlite",
+  "semantic_dir": "index/semantic",
+  "chunk_chars": 2400,
+  "chunk_overlap_chars": 240,
+  "semantic_model": "sentence-transformers/all-MiniLM-L6-v2"
+}
