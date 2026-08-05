@@ -10,12 +10,21 @@ Open this folder as the Codex workspace and ask a normal question about the arch
 
 No agent swarm is required. Codex uses deterministic local search tools and then answers in the current conversation.
 
+## Use it from a Custom GPT
+
+The `archive_context` package adds a resident, deterministic, read-only context service. A Custom GPT can call its single authenticated Action, `crowley_context`, through a narrowly scoped HTTPS tunnel. Codex, Crowley, remote models, and search subprocesses are not in that request path.
+
+See `CUSTOM_GPT_SETUP.md` for token creation, launch, tunnel, Action import, GPT instructions, health checks, and rollback. `MCP_MIGRATION.md` describes the later move from the Custom GPT Action into ordinary ChatGPT through MCP while retaining the same retrieval engine.
+
 ## Important locations
 
 - `raw/chatgpt-export/`: copied source export; never edit these files.
 - `index/archive.sqlite`: normalized conversations, messages, turns, and SQLite FTS5 index.
 - `tools/search_archive.py`: primary search command.
 - `tools/open_context.py`: opens complete neighboring turns from a result.
+- `archive_context/`: deterministic retrieval engine and local HTTP service.
+- `openapi-action.json`: minimal one-operation Custom GPT Action schema.
+- `tools/evaluate_context.py`: ignored local real-archive evaluation harness.
 - `manifests/`: verification and index-build records.
 - `canon/`: final songs, documents, or other accepted artifacts you choose to preserve.
 - `reports/`: longitudinal analyses derived from the archive.
@@ -64,6 +73,25 @@ The optional semantic layer remains local. By default it embeds user-authored me
 ```
 
 The embedding model and vectors are derivative data. They can be deleted and rebuilt without affecting the archive.
+
+## Test the complete project
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+Run the existing archive validation without replacing the checked local report:
+
+```powershell
+$validationOutput = Join-Path $env:TEMP 'archive-validation.json'
+.\.venv\Scripts\python.exe .\tools\validate_archive.py --output $validationOutput
+```
+
+Real-archive context queries and source IDs stay in the ignored `evals/context_gold.local.json` file:
+
+```powershell
+.\.venv\Scripts\python.exe .\tools\evaluate_context.py --output .\evals\results\latest.local.json
+```
 
 ## Updating with a future export
 

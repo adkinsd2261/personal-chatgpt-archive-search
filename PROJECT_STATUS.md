@@ -1,6 +1,6 @@
 # Project Status
 
-Verified complete on August 4, 2026.
+Verified through the local Archive Context MVP on August 5, 2026.
 
 ## Corpus
 
@@ -26,12 +26,29 @@ Verified complete on August 4, 2026.
 - Full source-window opening with stable `archive://` identifiers
 - Heuristic accepted/rejected draft labels for creative-work navigation
 
+## Archive Context MVP
+
+- Transport-neutral deterministic engine in `archive_context/`
+- One authenticated read-only HTTP operation: `POST /api/context`
+- Static Custom GPT Action operation ID: `crowley_context`
+- Resident embedding model and memory-mapped vectors; no per-request subprocess
+- User-authored primary evidence with explicitly labeled assistant context
+- Exact, earliest, latest, longitudinal, decision, and correction intent handling
+- Bounded variants, score traces, seed expansion, duplicate suppression, conversation caps, and temporal relevance gates
+- Light/medium/deep limits of 5/10/15 episodes and 9,000/18,000/30,000 serialized characters
+- Standard-library service with constant-time bearer verification, strict request limits, two-worker default concurrency, queue timeout, and retrieval timeout
+- Default bind address `127.0.0.1`; no query or excerpt logging by default
+- Custom GPT first; later ordinary-ChatGPT MCP adapter documented without changing the engine
+
 ## Validation
 
-- Seven unit tests passing
+- 28 offline unit, integration, and HTTP service tests passing, including all seven original tests
 - Expected conversation and author-message counts match exactly
 - Exact lyric, named-project, life-event, and conceptual retrieval smoke tests passing
+- Local eight-case context evaluation: source Recall@5 and Recall@10 100%, user-primary precision 100%, zero rejected-assistant leakage, and deterministic repeated packets
+- Known recent state correction improved from baseline rank 26 to rank 2
+- Measured cold runtime plus first request below 3 seconds and warm p95 below 2 seconds on this machine
+- SQLite and semantic file hashes unchanged across the real-archive evaluation
 - Working launcher: `Search Archive.cmd`
 
-See `manifests/raw_copy_manifest.json`, `manifests/index_manifest.json`, and `manifests/validation.json` for machine-readable evidence.
-
+See the ignored `evals/results/latest.local.json` for private machine-readable context metrics. Existing raw/index/validation manifests remain local and untracked.
