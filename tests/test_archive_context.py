@@ -125,7 +125,7 @@ class ArchiveContextTests(unittest.TestCase):
     def test_engine_applies_complete_packet_budget(self) -> None:
         result = self.engine.context("Crowley", "light")
         encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
-        self.assertLessEqual(len(encoded), 9_000)
+        self.assertLessEqual(len(encoded), 9_000 - result["limits"]["transport_reserve"])
         self.assertEqual(len(encoded), result["limits"]["serialized_characters"])
 
     def test_sanitizer_exposes_bidi_and_removes_control_characters(self) -> None:

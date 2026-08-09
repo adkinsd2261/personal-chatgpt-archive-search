@@ -37,18 +37,21 @@ Verified through the local Archive Context MVP on August 5, 2026.
 - Bounded variants, score traces, seed expansion, duplicate suppression, conversation caps, and temporal relevance gates
 - Light/medium/deep limits of 5/10/15 episodes and 9,000/18,000/30,000 serialized characters
 - Standard-library service with constant-time bearer verification, strict request limits, two-worker default concurrency, queue timeout, and retrieval timeout
+- Uniform Action envelopes with `success`, a fresh body-level receipt, evidence count, structured error codes, and retryability
+- Complete HTTP responses remain inside the 9,000/18,000/30,000 character limits through a bounded transport reserve
 - Default bind address `127.0.0.1`; no query or excerpt logging by default
-- Custom GPT first; later ordinary-ChatGPT MCP adapter documented without changing the engine
+- Custom GPT first; later ordinary-ChatGPT MCP transport and owned required-tool runtime documented as distinct phases
 
 ## Validation
 
-- 28 offline unit, integration, and HTTP service tests passing, including all seven original tests
+- 31 offline unit, integration, and HTTP service tests passing, including all seven original tests
 - Expected conversation and author-message counts match exactly
 - Exact lyric, named-project, life-event, and conceptual retrieval smoke tests passing
 - Local eight-case context evaluation: source Recall@5 and Recall@10 100%, user-primary precision 100%, zero rejected-assistant leakage, and deterministic repeated packets
 - Known recent state correction improved from baseline rank 26 to rank 2
-- Measured cold runtime plus first request below 3 seconds and warm p95 below 2 seconds on this machine
+- Latest measured cold runtime plus first request: 4.93 seconds; warm p95: 1.34 seconds on this machine
 - SQLite and semantic file hashes unchanged across the real-archive evaluation
+- Thirty-prompt live Custom GPT corral test prepared; it must be completed in Preview because local tests cannot force the hosted GPT's tool-selection behavior
 - Working launcher: `Search Archive.cmd`
 
 See the ignored `evals/results/latest.local.json` for private machine-readable context metrics. Existing raw/index/validation manifests remain local and untracked.

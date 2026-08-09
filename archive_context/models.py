@@ -17,12 +17,13 @@ class DepthConfig:
     turn_limit: int
     expansion_seeds: int
     conversation_cap: int
+    transport_reserve: int = 0
 
 
 DEPTH_CONFIGS = {
-    "light": DepthConfig("light", 5, 9_000, 160, 80, 3, 2),
-    "medium": DepthConfig("medium", 10, 18_000, 300, 160, 5, 2),
-    "deep": DepthConfig("deep", 15, 30_000, 500, 260, 8, 3),
+    "light": DepthConfig("light", 5, 9_000, 160, 80, 3, 2, 512),
+    "medium": DepthConfig("medium", 10, 18_000, 300, 160, 5, 2, 512),
+    "deep": DepthConfig("deep", 15, 30_000, 500, 260, 8, 3, 512),
 }
 
 
