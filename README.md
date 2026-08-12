@@ -12,9 +12,9 @@ No agent swarm is required. Codex uses deterministic local search tools and then
 
 ## Use it from a Custom GPT
 
-The `archive_context` package adds a resident, deterministic, read-only context service. A Custom GPT can call its single authenticated Action, `crowley_context`, through a narrowly scoped HTTPS tunnel. Codex, Crowley, remote models, and search subprocesses are not in that request path.
+The `archive_context` package adds a resident, deterministic, read-only context service. A Custom GPT can call its single authenticated Action, `crowley_context`, through a narrowly scoped HTTPS tunnel. Every success or handled failure carries a fresh body-level receipt so actual Action use can be checked instead of inferred from model prose. Codex, Crowley, remote models, and search subprocesses are not in that request path.
 
-See `CUSTOM_GPT_SETUP.md` for token creation, launch, tunnel, Action import, GPT instructions, health checks, and rollback. `MCP_MIGRATION.md` describes the later move from the Custom GPT Action into ordinary ChatGPT through MCP while retaining the same retrieval engine.
+See `CUSTOM_GPT_SETUP.md` for token creation, launch, tunnel, Action import, GPT instructions, health checks, and rollback. Run `CORRAL_TEST.md` before relying on archive-grounded answers. `MCP_MIGRATION.md` separates the later ordinary-ChatGPT MCP transport from a genuinely required-tool runtime using the Responses API or Agents SDK.
 
 ## Important locations
 
@@ -24,6 +24,7 @@ See `CUSTOM_GPT_SETUP.md` for token creation, launch, tunnel, Action import, GPT
 - `tools/open_context.py`: opens complete neighboring turns from a result.
 - `archive_context/`: deterministic retrieval engine and local HTTP service.
 - `openapi-action.json`: minimal one-operation Custom GPT Action schema.
+- `CORRAL_TEST.md`: 30-prompt live tool-use and fail-closed acceptance test.
 - `tools/evaluate_context.py`: ignored local real-archive evaluation harness.
 - `manifests/`: verification and index-build records.
 - `canon/`: final songs, documents, or other accepted artifacts you choose to preserve.

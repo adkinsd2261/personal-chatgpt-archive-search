@@ -11,7 +11,7 @@ import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -22,6 +22,67 @@ from .security import BearerTokenVerifier, TOKEN_ENV
 
 
 LOGGER = logging.getLogger("archive_context.service")
+
+
+def _issued_at_utc() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _receipt(request_id: str, issued_at_utc: str) -> dict[str, str]:
+    return {
+        "request_id": request_id,
+        "issued_at_utc": issued_at_utc,
+        "algorithm_version": ALGORITHM_VERSION,
+    }
+
+
+def _serialized_length(payload: dict[str, Any]) -> int:
+    return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+
+
+def _context_success_payload(result: dict[str, Any], request_id: str, issued_at_utc: str) -> dict[str, Any]:
+    reserved = {"success", "status", "receipt", "evidence_count", "error"}
+    if reserved & set(result):
+        raise RequestProblem(500, "invalid_engine_response", "The context engine returned an invalid envelope.")
+    payload = {
+        "success": True,
+        "status": "ok",
+        "receipt": _receipt(request_id, issued_at_utc),
+        "evidence_count": len(result.get("episodes", [])),
+        **result,
+    }
+    limits = payload.get("limits")
+    if isinstance(limits, dict) and isinstance(limits.get("character_limit"), int):
+        previous = -1
+        for _ in range(4):
+            current = _serialized_length(payload)
+            limits["serialized_characters"] = current
+            if current == previous:
+                break
+            previous = current
+        if _serialized_length(payload) > limits["character_limit"]:
+            raise RequestProblem(500, "response_too_large", "The context response exceeded its hard limit.")
+    return payload
+
+
+def _context_error_payload(
+    status: int,
+    code: str,
+    message: str,
+    request_id: str,
+    issued_at_utc: str,
+) -> dict[str, Any]:
+    return {
+        "success": False,
+        "status": "error",
+        "receipt": _receipt(request_id, issued_at_utc),
+        "evidence_count": 0,
+        "error": {
+            "code": code,
+            "message": message,
+            "retryable": status in {500, 503, 504},
+        },
+    }
 
 
 def _environment_int(name: str, default: int) -> int:
@@ -47,7 +108,7 @@ def _environment_float(name: str, default: float) -> float:
 @dataclass(frozen=True)
 class ServiceSettings:
     host: str = "127.0.0.1"
-    port: int = 8765
+    port: int = 8766
     max_body_bytes: int = 16_384
     max_query_bytes: int = 12_000
     max_concurrency: int = 2
@@ -75,7 +136,7 @@ class ServiceSettings:
     def from_environment(cls) -> "ServiceSettings":
         return cls(
             host=os.getenv("ARCHIVE_CONTEXT_HOST", "127.0.0.1"),
-            port=_environment_int("ARCHIVE_CONTEXT_PORT", 8765),
+            port=_environment_int("ARCHIVE_CONTEXT_PORT", 8766),
             max_body_bytes=_environment_int("ARCHIVE_CONTEXT_MAX_BODY_BYTES", 16_384),
             max_query_bytes=_environment_int("ARCHIVE_CONTEXT_MAX_QUERY_BYTES", 12_000),
             max_concurrency=_environment_int("ARCHIVE_CONTEXT_MAX_CONCURRENCY", 2),
@@ -235,6 +296,7 @@ class ContextRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         started = time.perf_counter()
         request_id = uuid.uuid4().hex
+        issued_at_utc = _issued_at_utc()
         try:
             self._authorize()
             if self.path != "/api/context":
@@ -251,11 +313,13 @@ class ContextRequestHandler(BaseHTTPRequestHandler):
                 raise RequestProblem(400, "invalid_json", "Request body must be valid UTF-8 JSON.") from exc
             context_request = ContextRequest.parse(value, self.context_server.context_service.settings)
             result = self.context_server.context_service.retrieve(context_request, request_id)
-            self._send_json(200, result, request_id, started)
+            self._send_json(200, _context_success_payload(result, request_id, issued_at_utc), request_id, started)
         except RequestProblem as exc:
+            if exc.status == 401:
+                self._discard_bounded_request_body()
             self._send_json(
                 exc.status,
-                {"error": {"code": exc.code, "message": exc.message}},
+                _context_error_payload(exc.status, exc.code, exc.message, request_id, issued_at_utc),
                 request_id,
                 started,
                 authenticate=exc.status == 401,
@@ -267,7 +331,13 @@ class ContextRequestHandler(BaseHTTPRequestHandler):
             try:
                 self._send_json(
                     500,
-                    {"error": {"code": "internal_error", "message": "The request failed safely."}},
+                    _context_error_payload(
+                        500,
+                        "internal_error",
+                        "The request failed safely.",
+                        request_id,
+                        issued_at_utc,
+                    ),
                     request_id,
                     started,
                 )
@@ -277,6 +347,7 @@ class ContextRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         started = time.perf_counter()
         request_id = uuid.uuid4().hex
+        issued_at_utc = _issued_at_utc()
         try:
             self._authorize()
             if self.path != "/api/health":
@@ -295,7 +366,7 @@ class ContextRequestHandler(BaseHTTPRequestHandler):
         except RequestProblem as exc:
             self._send_json(
                 exc.status,
-                {"error": {"code": exc.code, "message": exc.message}},
+                _context_error_payload(exc.status, exc.code, exc.message, request_id, issued_at_utc),
                 request_id,
                 started,
                 authenticate=exc.status == 401,
@@ -318,6 +389,19 @@ class ContextRequestHandler(BaseHTTPRequestHandler):
         if length < 0 or length > self.context_server.context_service.settings.max_body_bytes:
             raise RequestProblem(413, "request_too_large", "Request body exceeds the configured limit.")
         return self.rfile.read(length)
+
+    def _discard_bounded_request_body(self) -> None:
+        """Avoid a TCP reset when rejecting a small POST before parsing its body."""
+        raw_length = self.headers.get("Content-Length")
+        try:
+            length = int(raw_length) if raw_length is not None else 0
+        except ValueError:
+            return
+        if 0 < length <= self.context_server.context_service.settings.max_body_bytes:
+            try:
+                self.rfile.read(length)
+            except (OSError, socket.timeout):
+                pass
 
     def _send_json(
         self,

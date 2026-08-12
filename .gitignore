@@ -15,6 +15,7 @@ evals/results/
 # Environments, caches, logs, and secrets
 .venv/
 .cache/
+.archive-backup/
 .env
 .env.*
 !.env.example

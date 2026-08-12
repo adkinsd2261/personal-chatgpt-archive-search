@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from archive_context import ArchiveRuntime, ContextEngine
+from archive_context.models import ALGORITHM_VERSION
 from archive_context.security import BearerTokenVerifier, TokenConfigurationError
 from archive_context.service import (
     ContextRequest,
@@ -81,8 +82,8 @@ def insert_turn(conn, conversation_id: str, turn_index: int, timestamp: float, u
 
 
 class RunningServer:
-    def __init__(self, engine) -> None:
-        self.settings = ServiceSettings(port=0)
+    def __init__(self, engine, settings: ServiceSettings | None = None) -> None:
+        self.settings = settings or ServiceSettings(port=0)
         self.server = create_server(engine=engine, token=TOKEN, settings=self.settings)
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
         self.thread.start()
@@ -118,6 +119,12 @@ class ArchiveServiceTests(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.running.close()
 
+    def assert_receipt_matches_header(self, body, headers) -> None:
+        self.assertEqual(body["receipt"]["request_id"], headers["X-Request-ID"])
+        self.assertEqual(len(body["receipt"]["request_id"]), 32)
+        self.assertTrue(body["receipt"]["issued_at_utc"].endswith("Z"))
+        self.assertEqual(body["receipt"]["algorithm_version"], ALGORITHM_VERSION)
+
     def test_action_shaped_request_is_authenticated_and_bounded(self) -> None:
         self.assertEqual(ServiceSettings().host, "127.0.0.1")
         status, headers, body = self.running.request(
@@ -126,16 +133,29 @@ class ArchiveServiceTests(unittest.TestCase):
             {"query": "Crowley identity", "depth": "light", "date_from": "2026-01-01"},
         )
         self.assertEqual(status, 200)
+        self.assertIs(body["success"], True)
+        self.assertEqual(body["status"], "ok")
+        self.assertEqual(body["evidence_count"], 0)
         self.assertEqual(body["schema_version"], "test")
-        self.assertTrue(headers["X-Request-ID"])
+        self.assert_receipt_matches_header(body, headers)
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertEqual(self.engine.calls[-1], ("Crowley identity", "light", "2026-01-01", None))
+
+    def test_receipt_is_new_for_each_action_request(self) -> None:
+        first = self.running.request("POST", "/api/context", {"query": "first"})
+        second = self.running.request("POST", "/api/context", {"query": "second"})
+        self.assertNotEqual(first[2]["receipt"]["request_id"], second[2]["receipt"]["request_id"])
 
     def test_authentication_fails_closed(self) -> None:
         for token in (None, "wrong-token-that-is-long-enough-000000000"):
             status, headers, body = self.running.request("POST", "/api/context", {"query": "private"}, token=token)
             self.assertEqual(status, 401)
+            self.assertIs(body["success"], False)
+            self.assertEqual(body["status"], "error")
+            self.assertEqual(body["evidence_count"], 0)
             self.assertEqual(body["error"]["code"], "unauthorized")
+            self.assertIs(body["error"]["retryable"], False)
+            self.assert_receipt_matches_header(body, headers)
             self.assertEqual(headers["WWW-Authenticate"], "Bearer")
 
     def test_validation_errors_do_not_echo_private_input(self) -> None:
@@ -157,13 +177,51 @@ class ArchiveServiceTests(unittest.TestCase):
         for value in cases:
             status, _headers, body = self.running.request("POST", "/api/context", value)
             self.assertEqual(status, 422)
+            self.assertIs(body["success"], False)
             self.assertEqual(body["error"]["code"], "invalid_request")
 
     def test_body_limit_is_enforced_before_json_parsing(self) -> None:
         oversized = {"query": "x" * 17_000}
         status, _headers, body = self.running.request("POST", "/api/context", oversized)
         self.assertEqual(status, 413)
+        self.assertIs(body["success"], False)
         self.assertEqual(body["error"]["code"], "request_too_large")
+
+    def test_timeout_returns_a_model_visible_retryable_failure(self) -> None:
+        class SlowEngine:
+            def context(self, *_args):
+                time.sleep(0.4)
+                return {"intent": {}, "episodes": [], "trace": {}}
+
+        running = RunningServer(
+            SlowEngine(),
+            ServiceSettings(port=0, max_concurrency=1, request_timeout_seconds=0.25),
+        )
+        try:
+            status, headers, body = running.request("POST", "/api/context", {"query": "slow"})
+            self.assertEqual(status, 504)
+            self.assertIs(body["success"], False)
+            self.assertEqual(body["error"]["code"], "request_timeout")
+            self.assertIs(body["error"]["retryable"], True)
+            self.assert_receipt_matches_header(body, headers)
+        finally:
+            running.close()
+
+    def test_engine_cannot_override_the_server_issued_envelope(self) -> None:
+        class InvalidEngine:
+            def context(self, *_args):
+                return {"success": False, "episodes": []}
+
+        running = RunningServer(InvalidEngine())
+        try:
+            status, headers, body = running.request("POST", "/api/context", {"query": "private"})
+            self.assertEqual(status, 500)
+            self.assertIs(body["success"], False)
+            self.assertEqual(body["error"]["code"], "invalid_engine_response")
+            self.assertIs(body["error"]["retryable"], True)
+            self.assert_receipt_matches_header(body, headers)
+        finally:
+            running.close()
 
     def test_health_is_authenticated_but_not_an_action(self) -> None:
         status, _headers, body = self.running.request("GET", "/api/health")
@@ -178,6 +236,22 @@ class ArchiveServiceTests(unittest.TestCase):
         ]
         self.assertEqual(operations, ["crowley_context"])
         self.assertEqual(set(schema["paths"]), {"/api/context"})
+        operation = schema["paths"]["/api/context"]["post"]
+        self.assertIn("Never retry it for the same user message", operation["description"])
+        self.assertIs(operation["x-openai-isConsequential"], False)
+        self.assertEqual(schema["servers"], [{"url": "https://archive.javlin.ai"}])
+        self.assertEqual(operation["security"], [{"bearerAuth": []}])
+        request_schema = operation["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(request_schema["required"], ["query"])
+        response_schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
+        self.assertTrue(
+            {"success", "receipt", "evidence_count", "episodes"}
+            <= set(response_schema["properties"])
+        )
+        self.assertEqual(
+            schema["components"]["securitySchemes"]["bearerAuth"],
+            {"type": "http", "scheme": "bearer"},
+        )
 
     def test_missing_service_token_prevents_startup(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
@@ -234,14 +308,20 @@ class RealEngineServiceTest(unittest.TestCase):
         self.temp.cleanup()
 
     def test_one_http_action_reaches_the_real_algorithm_without_a_subprocess(self) -> None:
-        status, _headers, body = self.running.request(
+        status, headers, body = self.running.request(
             "POST",
             "/api/context",
             {"query": "corrected final position Crowley agents", "depth": "light"},
         )
         self.assertEqual(status, 200)
+        self.assertIs(body["success"], True)
+        self.assertEqual(body["evidence_count"], len(body["episodes"]))
+        self.assertEqual(body["receipt"]["request_id"], headers["X-Request-ID"])
         self.assertEqual(body["episodes"][0]["source_uri"], "archive://conversation/c1/turn/1")
         self.assertEqual(body["episodes"][0]["primary_evidence"]["role"], "user")
+        encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+        self.assertLessEqual(len(encoded), body["limits"]["character_limit"])
+        self.assertEqual(len(encoded), body["limits"]["serialized_characters"])
 
 
 if __name__ == "__main__":
