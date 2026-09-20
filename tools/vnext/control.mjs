@@ -8,7 +8,10 @@ if(!['status','index','benchmark-lexical','tick','worker-status'].includes(comma
   process.exit(2);
 }
 if(!process.env.DATABASE_URL) throw new Error('DATABASE_URL must be supplied through the environment');
-const sql=postgres(process.env.DATABASE_URL,{max:1,prepare:false,connect_timeout:10,idle_timeout:10});
+const sql=postgres(process.env.DATABASE_URL,{
+  max:1,prepare:false,connect_timeout:10,idle_timeout:10,
+  connection:{statement_timeout:command==='benchmark-lexical'?12000:45000,lock_timeout:5000},
+});
 try {
   const [{generation}]=await sql`select active_generation_id generation from archive_private.corpus_state`;
   if(command==='status') console.log(JSON.stringify((await sql`select archive_vnext.status(${generation}) result`)[0].result,null,2));
@@ -30,9 +33,9 @@ try {
     // This deliberately cannot pass the end-to-end promotion gate.
     const [suite]=await sql`select * from archive_vnext.benchmark_suites where generation_id=${generation} order by frozen_at desc limit 1`;
     if(!suite) throw new Error('Freeze a private, source-checked suite before running');
-    const [{id}]=await sql`insert into archive_vnext.benchmark_runs(suite_id,candidate_revision,baseline_revision,kind,budgets) values(${suite.id},${process.env.CANDIDATE_REVISION??'working-tree'},'v3-connector-search','lexical_component','{"queries":1,"results":8,"semantic":false}') returning id`;
+    const [{id}]=await sql`insert into archive_vnext.benchmark_runs(suite_id,candidate_revision,baseline_revision,kind,budgets) values(${suite.id},${process.env.CANDIDATE_REVISION??'working-tree'},'v3-connector-search','lexical_component','{"queries":1,"results":8,"semantic":false,"statement_timeout_ms":12000,"arm_order":"alternating_by_case"}') returning id`;
     const results=[];
-    for(const c of suite.cases) for(const arm of ['v3','vnext']) {
+    for(const [index,c] of suite.cases.entries()) for(const arm of (index%2?['vnext','v3']:['v3','vnext'])) {
       const start=performance.now();let result,error;
       try {
         const rows=arm==='v3' ? await sql`select archive_private.connector_search_v1(array[${c.query}],${c.intent==='exact'?c.query:null},null,null,false,8) result` : await sql`select archive_vnext.search(${c.query},null,${generation},${c.role_scope},null,null,8,false,${c.intent==='exact'}) result`;

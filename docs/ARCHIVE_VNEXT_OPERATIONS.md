@@ -39,6 +39,11 @@ queries. Do not expose these schemas to the Data API, publish a database URL, or
 give SQL credentials to the model. Custom authentication is why JWT verification
 is disabled for this one function; every request still requires a scoped token.
 
+Literal search uses a trigram index before inspecting full role text, with SQL
+wildcards escaped. Database connections enforce a 12-second statement timeout
+and a five-second lock timeout. A function-local timeout alone does not reliably
+bound a statement already running when the function starts.
+
 `open_context` pages use Unicode code-point offsets, matching PostgreSQL rather
 than JavaScript UTF-16 indexes. Read `next_offset` until null for a complete
 frame. Message pointers distinguish the prior assistant turn, user anchor, and
@@ -69,10 +74,56 @@ to the exact snapshot. Do not treat a turn index as a cross-generation message I
 The dispatcher is installed disabled. Operator setup supplies a Vault secret,
 dedicated expiring embedding token, approved endpoint, stop time and request
 budget. The scheduled job calls only `archive_vnext.dispatch_backfill()`.
-It allows at most two outstanding requests, stops after five failed responses,
-and unschedules itself at the deadline, request budget or drained queue.
-`pg_net` is a wake-up transport; logged embedding jobs and lease tokens provide
+The current dispatcher runs one HTTP request at a time, stops after five failed
+responses, and unschedules itself at the deadline, request budget or drained
+queue. It uses private direct HTTP with the platform's five-second HTTP timeout
+and a fifteen-second SQL deadline. Logged embedding jobs and lease tokens provide
 durability. A lost HTTP response cannot acknowledge another worker's lease.
+
+The original `pg_net` transport was replaced after testing showed that its
+platform-owned queue grants could not be revoked by the project operator.
+The active credential is never submitted to that queue; former queue credentials
+were revoked. The historical grant migration is not a security boundary.
+
+First-time operator setup, after `finish_build` succeeds, can run entirely
+inside the database. Replace the endpoint placeholder with the target project.
+This creates a seven-day, embedding-only credential without returning its value;
+running it a second time fails instead of silently rotating an active worker.
+
+```sql
+begin;
+select set_config('vnext.backfill_endpoint',
+  'https://YOUR_PROJECT_REF.supabase.co/functions/v1/crowley-archive-vnext', true);
+do $$
+declare token text; g text;
+begin
+  select active_generation_id into g from archive_private.corpus_state;
+  if not exists(select 1 from archive_vnext.builds
+    where generation_id=g and status='indexed') then
+    raise exception 'finish the frame build first';
+  end if;
+  token:=encode(extensions.gen_random_bytes(32),'hex');
+  perform vault.create_secret(token,'archive_vnext_embedding_worker_v1',
+    'Bounded vNext embedding backfill; seven-day expiry');
+  insert into crowley_v2.api_tokens
+    (token_sha256,label,scopes,expires_at,minute_limit)
+    values(encode(extensions.digest(token,'sha256'),'hex'),
+      'vnext-embedding-worker-v1',array['embedding:write'],
+      now()+interval '7 days',60);
+  insert into archive_vnext.backfill_control
+    (endpoint,vault_secret_name,enabled,stop_at,request_budget)
+    values(current_setting('vnext.backfill_endpoint'),
+      'archive_vnext_embedding_worker_v1',true,
+      now()+interval '7 days',200000);
+end $$;
+select cron.schedule('crowley-vnext-embedding-backfill','2 seconds',
+  'set statement_timeout=''15s''; select archive_vnext.dispatch_backfill();');
+commit;
+```
+
+The budget is a ceiling, not a prediction that every frame will finish within it.
+Inspect remaining jobs before deliberately extending or restarting a stopped run.
+Completion of this job never changes the production connector.
 
 Inspect progress without exposing credentials:
 
@@ -106,6 +157,8 @@ Run `tests/vnext/integration.sql` only against an isolated development database.
 It creates synthetic archive fixtures in a transaction and rolls them back.
 Live smoke fixtures, if retained on a preview branch for HTTP tests, must use a
 different generation before re-running the transaction test.
+`tests/vnext/literal-search.sql` separately verifies literal percent, underscore,
+backslash and authorship filtering against the indexed path.
 
 `tools/vnext/control.mjs` uses an operator-provided `DATABASE_URL` environment
 variable. Commands: `status`, `index`, `benchmark-lexical`, `tick`,
@@ -127,6 +180,14 @@ When calling the migration tool, omit file-level BEGIN/COMMIT so schema changes
 and its history entry remain in the tool's transaction. A same-second remote
 timestamp collision was inspected and repaired by reapplying the idempotent
 hardening migration; the pre-existing archive was not reset.
+
+A full-corpus trigram build can exceed the management API timeout. The optional
+`vnext_literal_index_builder` migration installs a database-side helper. Schedule
+its documented one-time job with a ten-minute statement limit; it unschedules
+on success or after two failed attempts. Confirm the index is valid, then apply
+`vnext_literal_search_index`, whose `IF NOT EXISTS` avoids rebuilding it. This
+prebuild may happen before that migration on an existing large database. Record
+and verify both migration names; never treat a timed-out response as success.
 
 The public repository did not contain the existing v3 migration history. These
 additions depend on that baseline and are not a standalone `supabase db reset`

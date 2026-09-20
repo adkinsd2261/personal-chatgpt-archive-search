@@ -3,7 +3,10 @@ import {Tokenizer} from 'npm:@huggingface/tokenizers@0.2.0';
 import {InputError, TOKENIZER_REVISION, embeddingBatch, validateVector, validateOperation, boundedJson, READ_TOOLS} from './core.mjs';
 
 declare const Supabase: {ai: {Session: new (name:string) => {run:(text:string,options:object)=>Promise<number[]>}}};
-const sql = postgres(Deno.env.get('SUPABASE_DB_URL')!, {max:2, prepare:false, idle_timeout:20, connect_timeout:10});
+const sql = postgres(Deno.env.get('SUPABASE_DB_URL')!, {
+  max:2, prepare:false, idle_timeout:20, connect_timeout:10,
+  connection:{statement_timeout:12000,lock_timeout:5000},
+});
 const model = new Supabase.ai.Session('gte-small');
 let tokenizerPromise: Promise<Tokenizer> | undefined;
 function getTokenizer() {
