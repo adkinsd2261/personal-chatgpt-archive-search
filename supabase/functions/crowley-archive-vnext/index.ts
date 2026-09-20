@@ -33,7 +33,9 @@ async function embed(text:string) {
 async function execute(op:ReturnType<typeof validateOperation>):Promise<unknown> {
   if (op.operation === 'status') return scalar(await sql`select archive_vnext.status(${op.generation ?? null}) result`);
   if (op.operation === 'open_context') return scalar(await sql`select archive_vnext.open_context(${op.source_uri!},${op.generation ?? null},${op.offset},${op.length}) result`);
-  if (op.operation === 'browse_time') return scalar(await sql`select archive_vnext.browse_time_filtered(${op.from!},${op.to!},${op.generation ?? null},${op.after_time ?? null},${op.after_id},${op.limit},${op.include_inactive}) result`);
+  // Force text parameters before PostgreSQL casts: the driver's timestamptz
+  // serializer otherwise round-trips strings through JS Date and loses microseconds.
+  if (op.operation === 'browse_time') return scalar(await sql`select archive_vnext.browse_time_filtered(${op.from!}::text::timestamptz,${op.to!}::text::timestamptz,${op.generation ?? null},${op.after_time ?? null}::text::timestamptz,${op.after_id},${op.limit},${op.include_inactive}) result`);
   if (op.operation === 'search_many') {
     const results = [];
     for (const query of op.queries) results.push(await execute(query));
@@ -52,7 +54,7 @@ async function execute(op:ReturnType<typeof validateOperation>):Promise<unknown>
         catch (error) { semanticError = error instanceof InputError ? error.message : 'embedding_unavailable'; }
       }
     }
-    const result = scalar(await sql`select archive_vnext.search(${op.query!},${vector}::extensions.halfvec(384),${op.generation ?? null},${op.role},${op.from ?? null},${op.to ?? null},${op.limit},${op.include_inactive},${op.operation==='search_text'}) result`) as Record<string,unknown>;
+    const result = scalar(await sql`select archive_vnext.search(${op.query!},${vector}::extensions.halfvec(384),${op.generation ?? null},${op.role},${op.from ?? null}::text::timestamptz,${op.to ?? null}::text::timestamptz,${op.limit},${op.include_inactive},${op.operation==='search_text'}) result`) as Record<string,unknown>;
     return retrievalHealth(result,semanticError);
   }
   if (op.operation === 'embed_next') {

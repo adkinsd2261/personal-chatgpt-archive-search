@@ -33,6 +33,23 @@ if(process.env.ARCHIVE_QA_SYNTHETIC==='1') {
     const active=value(await call('browse_time',args));assert.equal(active.matches.length,2);assert.ok(active.matches.every(x=>x.source_state==='active_path'));
     const all=value(await call('browse_time',{...args,include_inactive:true}));assert.equal(all.matches.length,3);
   });
+  await check('microsecond timeline cursor advances through actual driver',async()=>{
+    const args={from:'2025-04-01T00:00:00Z',to:'2025-04-02T00:00:00Z',limit:1};
+    const first=value(await call('browse_time',args));
+    assert.equal(first.matches[0]?.source_uri,'archive://conversation/vnext-cursor-fixture/turn/0');
+    assert.match(first.next_cursor.after_time,/\.123456/);
+    const second=value(await call('browse_time',{...args,...first.next_cursor}));
+    assert.equal(second.matches[0]?.source_uri,'archive://conversation/vnext-cursor-fixture/turn/1');
+    const end=value(await call('browse_time',{...args,...second.next_cursor}));
+    assert.equal(end.matches.length,0);
+    assert.equal(end.next_cursor,null);
+  });
+  for(const name of ['search_context','search_text']) {
+    await check(name+' preserves microsecond date boundaries',async()=>{
+      const x=value(await call(name,{query:'cursor witness',from:'2025-04-01T00:00:00.123457Z',to:'2025-04-01T00:00:00.123457Z'}));
+      assert.deepEqual(x.matches.map(m=>m.source_uri),['archive://conversation/vnext-cursor-fixture/turn/1']);
+    });
+  }
   await check('open returns correction navigation and modality limit',async()=>{
     const x=value(await call('open_context',{source_uri:'archive://conversation/vnext-fixture/turn/0',length:20000}));
     assert.ok(x.neighbors.some(n=>n.source_uri==='archive://conversation/vnext-fixture/turn/1'));
