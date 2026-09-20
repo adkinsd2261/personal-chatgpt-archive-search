@@ -55,19 +55,31 @@ const integer = (x, fallback, min, max, field) => {
 };
 const date = (x, field) => {
   if (x === undefined || x === null) return null;
-  if (typeof x !== 'string' || !/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/.test(x) || !Number.isFinite(Date.parse(x))) throw new InputError(`invalid_${field}`);
-  return new Date(x).toISOString();
+  const match = typeof x === 'string' && x.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,6})?(Z|[+-]\d{2}:\d{2})$/);
+  if (!match || !Number.isFinite(Date.parse(x))) throw new InputError(`invalid_${field}`);
+  const [,year,month,day,hour,minute,second,zone] = match;
+  const days = new Date(Date.UTC(Number(year),Number(month),0)).getUTCDate();
+  if (+year<1 || +month<1 || +month>12 || +day<1 || +day>days || +hour>23 || +minute>59 || +second>59 ||
+    (zone!=='Z' && (+zone.slice(1,3)>23 || +zone.slice(4)>59))) throw new InputError(`invalid_${field}`);
+  // Keep PostgreSQL microseconds intact; converting to a JS Date and back loses
+  // cursor precision and can repeat the final row of a timeline page forever.
+  return x;
 };
 
 export function validateOperation(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new InputError('invalid_request');
   const operation = input.operation;
   if (!['status','search_context','search_text','search_many','open_context','browse_time','embed_next'].includes(operation)) throw new InputError('unknown_operation');
+  const allowed = ['operation','generation',...({status:[],embed_next:[],search_many:['queries'],open_context:['source_uri','offset','length'],browse_time:['from','to','after_time','after_id','limit','include_inactive'],search_context:['query','from','to','role','limit','include_inactive'],search_text:['query','from','to','role','limit','include_inactive']}[operation])];
+  if (Object.keys(input).some(key=>!allowed.includes(key))) throw new InputError('unsupported_argument');
   const generation = str(input.generation, 120, 'generation', true);
   if (operation === 'status' || operation === 'embed_next') return {operation, generation};
   if (operation === 'search_many') {
     if (!Array.isArray(input.queries) || input.queries.length < 1 || input.queries.length > 4) throw new InputError('invalid_queries');
-    return {operation, queries:input.queries.map(q => validateOperation({...q, operation:'search_context', generation}))};
+    return {operation, queries:input.queries.map(q => {
+      if (!q || typeof q!=='object' || Array.isArray(q) || 'operation' in q || 'generation' in q) throw new InputError('invalid_query');
+      return validateOperation({...q, operation:'search_context', generation});
+    })};
   }
   if (operation === 'open_context') {
     const source_uri = str(input.source_uri, 500, 'source_uri');
@@ -76,13 +88,15 @@ export function validateOperation(input) {
   }
   const from = date(input.from, 'from');
   const to = date(input.to, 'to');
-  if (from && to && from > to) throw new InputError('inverted_dates');
+  if (from && to && Date.parse(from) > Date.parse(to)) throw new InputError('inverted_dates');
   if (operation === 'browse_time') {
     if (!from || !to) throw new InputError('timeline_bounds_required');
     const after_time = date(input.after_time, 'after_time');
     const after_id = integer(input.after_id, 0, 0, Number.MAX_SAFE_INTEGER, 'after_id');
-    if (!after_time && after_id) throw new InputError('incomplete_cursor');
-    return {operation, generation, from, to, after_time, after_id, limit:integer(input.limit, 20, 1, 100, 'limit')};
+    if (Boolean(after_time)!==Boolean(after_id)) throw new InputError('incomplete_cursor');
+    if (after_time && (Date.parse(after_time)<Date.parse(from) || Date.parse(after_time)>Date.parse(to))) throw new InputError('cursor_outside_range');
+    if (input.include_inactive!==undefined && typeof input.include_inactive!=='boolean') throw new InputError('invalid_include_inactive');
+    return {operation, generation, from, to, after_time, after_id, include_inactive:input.include_inactive??false, limit:integer(input.limit, 20, 1, 100, 'limit')};
   }
   const role = input.role ?? 'both';
   if (!['user','assistant','both'].includes(role)) throw new InputError('invalid_role');
@@ -113,11 +127,19 @@ export async function boundedJson(request, limit = 65536) {
   } finally { reader.releaseLock(); }
 }
 
+/** @param {Record<string, any>} result @param {string|null} semanticError */
+export function retrievalHealth(result, semanticError=null) {
+  const reasons=[];
+  if (semanticError) reasons.push(semanticError);
+  if (result.retrieval_mode==='hybrid_rrf' && (!result.status || result.status.build_status!=='indexed' || result.status.embedded_frames<result.status.frames)) reasons.push('semantic_index_incomplete');
+  return {...result,semantic_error:semanticError,degraded:reasons.length>0,degraded_reasons:reasons};
+}
+
 export const READ_TOOLS = [
   {name:'search_context', description:'Hybrid search of role-labeled historical context. Candidates are not conclusions; open sources. Assistant text is discovery only.', inputSchema:{type:'object', properties:{query:{type:'string',maxLength:2000},role:{enum:['user','assistant','both']},generation:{type:'string'},from:{type:'string'},to:{type:'string'},limit:{type:'integer',minimum:1,maximum:20},include_inactive:{type:'boolean'}},required:['query'],additionalProperties:false}},
-  {name:'search_text', description:'Literal text discovery, with explicit authorship and inactive-branch filters.', inputSchema:{type:'object',properties:{query:{type:'string'},role:{enum:['user','assistant','both']},generation:{type:'string'},limit:{type:'integer',minimum:1,maximum:20},include_inactive:{type:'boolean'}},required:['query'],additionalProperties:false}},
+  {name:'search_text', description:'Literal text discovery, with explicit authorship and inactive-branch filters.', inputSchema:{type:'object',properties:{query:{type:'string'},role:{enum:['user','assistant','both']},generation:{type:'string'},from:{type:'string'},to:{type:'string'},limit:{type:'integer',minimum:1,maximum:20},include_inactive:{type:'boolean'}},required:['query'],additionalProperties:false}},
   {name:'open_context', description:'Open immutable evidence with exact role/source pointers and explicit Unicode pagination. Continue next_offset before claiming complete coverage.', inputSchema:{type:'object',properties:{source_uri:{type:'string'},generation:{type:'string'},offset:{type:'integer',minimum:0},length:{type:'integer',minimum:1,maximum:20000}},required:['source_uri'],additionalProperties:false}},
-  {name:'browse_time', description:'Browse a bounded time range with a stable date/id cursor. Dates require timezones; pages are not exhaustive answers.', inputSchema:{type:'object',properties:{from:{type:'string'},to:{type:'string'},generation:{type:'string'},after_time:{type:'string'},after_id:{type:'integer'},limit:{type:'integer',minimum:1,maximum:100}},required:['from','to'],additionalProperties:false}},
-  {name:'search_many', description:'Up to four explicit model-generated search formulations. No SQL query planner invents intent or decides truth.', inputSchema:{type:'object',properties:{queries:{type:'array',minItems:1,maxItems:4,items:{type:'object',properties:{query:{type:'string'},role:{enum:['user','assistant','both']}},required:['query']}},generation:{type:'string'}},required:['queries'],additionalProperties:false}},
+  {name:'browse_time', description:'Browse a bounded time range with a stable date/id cursor. Dates require timezones; pages are not exhaustive answers.', inputSchema:{type:'object',properties:{from:{type:'string'},to:{type:'string'},generation:{type:'string'},after_time:{type:'string'},after_id:{type:'integer',minimum:1},include_inactive:{type:'boolean'},limit:{type:'integer',minimum:1,maximum:100}},required:['from','to'],additionalProperties:false}},
+  {name:'search_many', description:'Up to four explicit model-generated search formulations. No SQL query planner invents intent or decides truth.', inputSchema:{type:'object',properties:{queries:{type:'array',minItems:1,maxItems:4,items:{type:'object',properties:{query:{type:'string',maxLength:2000},role:{enum:['user','assistant','both']},from:{type:'string'},to:{type:'string'},limit:{type:'integer',minimum:1,maximum:20},include_inactive:{type:'boolean'}},required:['query'],additionalProperties:false}},generation:{type:'string'}},required:['queries'],additionalProperties:false}},
   {name:'archive_status', description:'Archive generation, freshness and embedding coverage. A new index does not mean new source data.', inputSchema:{type:'object',properties:{generation:{type:'string'}},additionalProperties:false}}
 ];

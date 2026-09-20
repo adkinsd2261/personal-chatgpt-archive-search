@@ -2,6 +2,13 @@
 
 Status: **shadow deployment verified and running; promotion blocked**.
 
+The subsequent [messaging-lane QA pass](MESSAGING_LANE_QA.md) repaired workflow,
+authorization-binding, timeline and retrieval-degradation defects. The updated
+checks passed 16 Node tests, Deno type checking, 28 workflow SQL assertions,
+the original 44 integration assertions and 14 development HTTP checks.
+It also found unresolved search timeouts and missing runtime/delivery paths.
+Successful foundation tests do not mean every messaging lane is operational.
+
 Archive vNext and the V2 primitive foundation are deployed alongside v3.
 The development branch is healthy. Production continues to use the original
 connector and retrieval function.

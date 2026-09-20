@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {embeddingBatch,validateOperation,validateVector,boundedJson,EMBEDDING_PREFIX} from '../../supabase/functions/crowley-archive-vnext/core.mjs';
+import {embeddingBatch,validateOperation,validateVector,boundedJson,EMBEDDING_PREFIX,READ_TOOLS,retrievalHealth} from '../../supabase/functions/crowley-archive-vnext/core.mjs';
 
 const tokenizer = {encode:text=>({ids:Array(Array.from(text).length+2).fill(1)})};
 test('Unicode embedding coverage is contiguous, bounded and resumable',()=>{
@@ -42,4 +42,35 @@ test('stream body cap works without trusting content-length',async()=>{
   assert.deepEqual(await boundedJson(request('{"ok":true}')),{ok:true});
   await assert.rejects(boundedJson(request('x'.repeat(100)),16),/body_too_large/);
   await assert.rejects(boundedJson(request('{')),/invalid_json/);
+});
+
+test('unsupported scope cannot be silently discarded',()=>{
+  assert.throws(()=>validateOperation({operation:'search_context',query:'project',conversation_id:'another-thread'}),/unsupported_argument/);
+  assert.throws(()=>validateOperation({operation:'search_many',queries:[{query:'project',generation:'another-generation'}]}),/invalid_query/);
+  assert.throws(()=>validateOperation({operation:'search_many',queries:[null]}),/invalid_query/);
+});
+test('calendar dates and microsecond timeline cursors round trip',()=>{
+  const base={operation:'browse_time',from:'2026-01-01T00:00:00Z',to:'2026-12-31T23:59:59Z'};
+  for(const from of ['2026-02-30T00:00:00Z','2025-02-29T00:00:00Z','2026-01-01T24:00:00Z']) assert.throws(()=>validateOperation({...base,from}));
+  assert.throws(()=>validateOperation({...base,after_time:'2026-02-01T12:00:00Z'}),/incomplete_cursor/);
+  assert.throws(()=>validateOperation({...base,after_time:'2027-01-01T00:00:00Z',after_id:1}),/cursor_outside_range/);
+  const precise='2026-02-01T12:00:00.123456+00:00';
+  assert.equal(validateOperation({...base,after_time:precise,after_id:42}).after_time,precise);
+  assert.doesNotThrow(()=>validateOperation({...base,from:'2026-01-02T00:00:00+12:00',to:'2026-01-01T13:00:00Z'}));
+  assert.doesNotThrow(()=>validateOperation({...base,from:'2024-02-29T00:00:00Z'}));
+});
+test('literal and multi-query schemas expose the filters the server supports',()=>{
+  const literal=READ_TOOLS.find(t=>t.name==='search_text').inputSchema;
+  assert.ok(literal.properties.from&&literal.properties.to);
+  const many=validateOperation({operation:'search_many',generation:'fixed',queries:[{query:'proposal',role:'assistant',from:'2025-01-01T00:00:00Z',to:'2026-01-01T00:00:00Z',include_inactive:true,limit:3}]});
+  assert.equal(many.queries[0].generation,'fixed');
+  assert.equal(many.queries[0].include_inactive,true);
+  assert.equal(many.queries[0].limit,3);
+});
+test('incomplete semantic coverage is visibly degraded',()=>{
+  const partial={retrieval_mode:'hybrid_rrf',status:{build_status:'indexed',frames:100,embedded_frames:1}};
+  assert.deepEqual(retrievalHealth(partial).degraded_reasons,['semantic_index_incomplete']);
+  assert.equal(retrievalHealth({...partial,status:{...partial.status,embedded_frames:100}}).degraded,false);
+  assert.equal(retrievalHealth({retrieval_mode:'lexical'},'semantic_index_incomplete').degraded,true);
+  assert.equal(retrievalHealth({retrieval_mode:'lexical'}).degraded,false);
 });

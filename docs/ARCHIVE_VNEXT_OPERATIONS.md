@@ -25,6 +25,12 @@ not inferred and activated from old assistant messages.
 
 ## Retrieval interface
 
+The messaging-lane QA pass adds strict date/scope validation, lossless timeline
+cursors, explicit branch/freshness reporting and adjacent-turn navigation.
+Context search uses lexical retrieval with `semantic_index_incomplete` until
+all frames are embedded; partial vectors must not dominate ranking. See
+[the lane QA contract](MESSAGING_LANE_QA.md) for coverage and remaining gaps.
+
 The `crowley-archive-vnext` Edge Function accepts POST JSON and stateless MCP
 JSON-RPC. Its tools are `search_context`, `search_text`, `search_many`,
 `open_context`, `browse_time`, and `archive_status`. It does not replace the

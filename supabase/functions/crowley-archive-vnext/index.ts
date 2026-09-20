@@ -1,6 +1,6 @@
 import postgres from 'npm:postgres@3.4.9';
 import {Tokenizer} from 'npm:@huggingface/tokenizers@0.2.0';
-import {InputError, TOKENIZER_REVISION, embeddingBatch, validateVector, validateOperation, boundedJson, READ_TOOLS} from './core.mjs';
+import {InputError, TOKENIZER_REVISION, embeddingBatch, validateVector, validateOperation, boundedJson, retrievalHealth, READ_TOOLS} from './core.mjs';
 
 declare const Supabase: {ai: {Session: new (name:string) => {run:(text:string,options:object)=>Promise<number[]>}}};
 const sql = postgres(Deno.env.get('SUPABASE_DB_URL')!, {
@@ -33,7 +33,7 @@ async function embed(text:string) {
 async function execute(op:ReturnType<typeof validateOperation>):Promise<unknown> {
   if (op.operation === 'status') return scalar(await sql`select archive_vnext.status(${op.generation ?? null}) result`);
   if (op.operation === 'open_context') return scalar(await sql`select archive_vnext.open_context(${op.source_uri!},${op.generation ?? null},${op.offset},${op.length}) result`);
-  if (op.operation === 'browse_time') return scalar(await sql`select archive_vnext.browse_time(${op.from!},${op.to!},${op.generation ?? null},${op.after_time ?? null},${op.after_id},${op.limit}) result`);
+  if (op.operation === 'browse_time') return scalar(await sql`select archive_vnext.browse_time_filtered(${op.from!},${op.to!},${op.generation ?? null},${op.after_time ?? null},${op.after_id},${op.limit},${op.include_inactive}) result`);
   if (op.operation === 'search_many') {
     const results = [];
     for (const query of op.queries) results.push(await execute(query));
@@ -43,11 +43,17 @@ async function execute(op:ReturnType<typeof validateOperation>):Promise<unknown>
     let vector:string|null = null;
     let semanticError:string|null = null;
     if (op.operation === 'search_context') {
-      try { vector = JSON.stringify(await embed(op.query!)); }
-      catch (error) { semanticError = error instanceof InputError ? error.message : 'embedding_unavailable'; }
+      const coverage = scalar(await sql`select archive_vnext.status(${op.generation ?? null}) result`) as Record<string,any>;
+      // A sparse chronological prefix is not a representative semantic corpus.
+      // Do not let its unrelated nearest neighbors outrank complete lexical hits.
+      if (coverage.build_status!=='indexed' || coverage.embedded_frames<coverage.frames) semanticError='semantic_index_incomplete';
+      else {
+        try { vector = JSON.stringify(await embed(op.query!)); }
+        catch (error) { semanticError = error instanceof InputError ? error.message : 'embedding_unavailable'; }
+      }
     }
     const result = scalar(await sql`select archive_vnext.search(${op.query!},${vector}::extensions.halfvec(384),${op.generation ?? null},${op.role},${op.from ?? null},${op.to ?? null},${op.limit},${op.include_inactive},${op.operation==='search_text'}) result`) as Record<string,unknown>;
-    return {...result,semantic_error:semanticError,degraded:semanticError!==null};
+    return retrievalHealth(result,semanticError);
   }
   if (op.operation === 'embed_next') {
     // One piece per invocation: hosted AI + tokenization must fit the 2s CPU
