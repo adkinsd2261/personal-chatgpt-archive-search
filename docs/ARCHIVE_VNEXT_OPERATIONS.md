@@ -68,8 +68,10 @@ is pinned to model revision `93b36ff09519291b77d6000d2e86bd8565378086` and
 including special tokens and a contextual prefix, and must fit 512 tokens.
 The model is English-oriented; exact text remains available for other languages.
 Overlapping pieces cover every Unicode character. No truncation is accepted as
-completion. Long frames checkpoint one piece per invocation after testing showed
-that larger batches can exceed the Edge Function CPU limit.
+completion. The tokenizer assets are bundled with the function and checked by
+SHA-256 tests. A conservative geometric shrink replaces repeated binary-search
+tokenization. The worker checkpoints at most two pieces per invocation; larger
+batches must be revalidated against the hosted CPU limit before increasing them.
 
 Raw archive rows are never updated, deleted or given new triggers. Frame builds
 read a fixed ready generation, preserve full text in the derived frame snapshot,
@@ -82,8 +84,8 @@ dedicated expiring embedding token, approved endpoint, stop time and request
 budget. The scheduled job calls only `archive_vnext.dispatch_backfill()`.
 The current dispatcher runs one HTTP request at a time, stops after five failed
 responses, and unschedules itself at the deadline, request budget or drained
-queue. It uses private direct HTTP with the platform's five-second HTTP timeout
-and a fifteen-second SQL deadline. Logged embedding jobs and lease tokens provide
+queue. It uses private direct HTTP with a bounded fifteen-second HTTP timeout
+and a thirty-second scheduled SQL deadline. Logged embedding jobs and lease tokens provide
 durability. A lost HTTP response cannot acknowledge another worker's lease.
 
 The original `pg_net` transport was replaced after testing showed that its
@@ -207,3 +209,42 @@ Index completion does not advance the archive's source cutoff. A fresh export
 still needs the existing external ingestion pipeline. vNext reports the actual
 generation cutoff, labels stale evidence and does not use old archive evidence
 to assert current state. New generations require their own verified build.
+
+## Operating controls
+
+`crowley_v2.operating_policy` defaults to maintenance disabled. Enable it only
+with an explicit protected-until date and an embedding credential valid beyond
+that date. `crowley_v2.maintenance_tick()` is suitable for a five-minute schedule.
+It expires deadlines and approvals, requeues abandoned worker leases within
+existing attempt budgets, and records private health snapshots and alerts.
+Intent dispatch is independently disabled until its host delivery path is ready.
+
+Transient embedding circuit breaks can recover after a cooldown, within a daily
+recovery cap. A credential failure, deliberate pause, spent request budget,
+expired deadline, or terminal job does not automatically restart. Successful HTTP
+responses and actual embedding progress are tracked separately. A response that
+only reports an idle worker does not count as progress.
+
+`archive_vnext.dispatch_literal_build()` builds bounded, overlapping literal
+passages in resumable batches and unschedules on completion. Exact retrieval
+uses the passage index only after every frame in the generation is covered.
+Passages retain role separation and literal wildcard handling. Quotes crossing
+passage or user/assistant boundaries remain searchable. Original source frames
+remain immutable. Literal results use a documented newest-first order.
+
+Operational retention only removes disposable usage, dispatch and health logs.
+It never removes source data, events, record versions or evaluation evidence.
+The existing recovery adapter remains authoritative: a checkpoint is not proof
+of a successful restore. An unchanged restore blocker must not be reported as
+fixed merely because operating checks succeed.
+
+Read private health with `select crowley_v2.operating_status();`. Alert only on
+unrecovered actionable faults. Known stale exports, advancing shadow indexes
+and an unrun release benchmark are launch limitations, not recurring incidents.
+New archive exports still require the existing ingestion path. A completed
+index never authorizes a retrieval cutover.
+
+Run `tests/vnext/operations.sql` and `tests/vnext/literal.sql` only on development;
+their synthetic writes roll back. `tests/vnext/tokenizer.test.mjs` validates the
+real bundled tokenizer, including long multilingual inputs. Keep real queries,
+credentials, health snapshots and operational deployment details private.

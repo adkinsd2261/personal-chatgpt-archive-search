@@ -25,18 +25,19 @@ export function embeddingBatch(text, tokenizer, {covered = 0, maxPieces = 8} = {
   let end = covered;
   while (end < chars.length && pieces.length < maxPieces) {
     const start = Math.max(0, end - Math.min(64, end));
-    let lo = end + 1;
-    let hi = Math.min(chars.length, start + 4096);
-    let best = 0;
-    while (lo <= hi) {
-      const mid = Math.floor((lo + hi) / 2);
-      const count = tokenizer.encode(EMBEDDING_PREFIX + chars.slice(start, mid).join(''), {add_special_tokens: true}).ids.length;
-      if (count <= 512) { best = mid; lo = mid + 1; } else hi = mid - 1;
+    // Start conservatively, then shrink geometrically. This avoids twelve
+    // full tokenizations per piece on the hosted runtime's 2-second CPU budget.
+    // It is deliberately not a maximal-length packing algorithm: coverage and
+    // actual tokenizer validation take precedence over filling all 512 tokens.
+    let best = Math.min(chars.length, start + 1800);
+    let input = "", token_count = 0;
+    while (best > end) {
+      input = EMBEDDING_PREFIX + chars.slice(start,best).join('');
+      token_count = tokenizer.encode(input,{add_special_tokens:true}).ids.length;
+      if (token_count <= 512) break;
+      best = start + Math.floor((best-start) * 0.7);
     }
     if (best <= end) throw new InputError('tokenizer_cannot_advance');
-    const input = EMBEDDING_PREFIX + chars.slice(start, best).join('');
-    const token_count = tokenizer.encode(input, {add_special_tokens: true}).ids.length;
-    if (token_count > 512) throw new InputError('tokenizer_overflow');
     pieces.push({start_offset:start, end_offset:best, token_count, tokenizer_version:TOKENIZER_VERSION, input});
     end = best;
   }

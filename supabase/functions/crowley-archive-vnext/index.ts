@@ -1,6 +1,8 @@
 import postgres from 'npm:postgres@3.4.9';
 import {Tokenizer} from 'npm:@huggingface/tokenizers@0.2.0';
-import {InputError, TOKENIZER_REVISION, embeddingBatch, validateVector, validateOperation, boundedJson, retrievalHealth, READ_TOOLS} from './core.mjs';
+import {InputError, embeddingBatch, validateVector, validateOperation, boundedJson, retrievalHealth, READ_TOOLS} from './core.mjs';
+import tokenizerDefinition from './vendor/tokenizer.json' with {type:'json'};
+import tokenizerConfig from './vendor/tokenizer_config.json' with {type:'json'};
 
 declare const Supabase: {ai: {Session: new (name:string) => {run:(text:string,options:object)=>Promise<number[]>}}};
 const sql = postgres(Deno.env.get('SUPABASE_DB_URL')!, {
@@ -8,20 +10,10 @@ const sql = postgres(Deno.env.get('SUPABASE_DB_URL')!, {
   connection:{statement_timeout:12000,lock_timeout:5000},
 });
 const model = new Supabase.ai.Session('gte-small');
-let tokenizerPromise: Promise<Tokenizer> | undefined;
-function getTokenizer() {
-  if (!tokenizerPromise) tokenizerPromise = (async () => {
-    const base = `https://huggingface.co/Supabase/gte-small/resolve/${TOKENIZER_REVISION}/`;
-    const read = async (file:string) => {
-      const r = await fetch(base + file, {signal:AbortSignal.timeout(15000)});
-      if (!r.ok) throw new Error('tokenizer_unavailable');
-      return r.json();
-    };
-    const [definition, config] = await Promise.all([read('tokenizer.json'),read('tokenizer_config.json')]);
-    return new Tokenizer(definition,config);
-  })().catch(error => {tokenizerPromise=undefined; throw error;});
-  return tokenizerPromise;
-}
+// Pinned model assets travel with the deployment; cold starts require no
+// external tokenizer fetch or third-party network availability.
+let tokenizerInstance: Tokenizer | undefined;
+function getTokenizer() { return tokenizerInstance ??= new Tokenizer(tokenizerDefinition,tokenizerConfig); }
 const scalar = (rows:Record<string,unknown>[]) => rows[0]?.result;
 
 async function embed(text:string) {
@@ -58,13 +50,13 @@ async function execute(op:ReturnType<typeof validateOperation>):Promise<unknown>
     return retrievalHealth(result,semanticError);
   }
   if (op.operation === 'embed_next') {
-    // One piece per invocation: hosted AI + tokenization must fit the 2s CPU
-    // budget even on Pro. Persist progress; never depend on waitUntil durability.
+    // Two conservatively tokenized pieces fit within a bounded invocation.
+    // Persist progress; never depend on waitUntil durability.
     const job = scalar(await sql`select archive_vnext.claim_embedding(120) result`) as Record<string,any>|null;
     if (!job) return {state:'idle'};
     try {
       const rows = await sql`select coalesce(max(end_offset),0)::integer covered from archive_vnext.embeddings where frame_id=${job.frame_id}`;
-      const batch = embeddingBatch(job.context_text,await getTokenizer(),{covered:rows[0].covered,maxPieces:1});
+      const batch = embeddingBatch(job.context_text,await getTokenizer(),{covered:rows[0].covered,maxPieces:2});
       const pieces = [];
       for (const {input,...piece} of batch.pieces) pieces.push({...piece,embedding:await embed(input)});
       return scalar(await sql`select archive_vnext.save_embedding_progress(${job.frame_id},${job.lease_token}::uuid,${job.content_hash},${sql.json(pieces)},${batch.complete}) result`);
