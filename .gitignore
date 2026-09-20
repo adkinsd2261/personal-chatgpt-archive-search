@@ -24,3 +24,9 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# vNext private fixtures, credentials, and Supabase local state
+private/
+supabase/.temp/
+supabase/.branches/
+node_modules/

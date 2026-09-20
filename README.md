@@ -2,6 +2,13 @@
 
 A local retrieval system for searchable access to multi-year ChatGPT conversation archives, emphasizing privacy, deterministic results, and hybrid retrieval with evaluation.
 
+The additive Supabase implementation is documented in
+[Crowley Archive vNext and V2 operations](docs/ARCHIVE_VNEXT_OPERATIONS.md).
+It builds role-labeled retrieval and the V2 runtime primitives alongside v3.
+See the [deployment verification](docs/VNEXT_DEPLOYMENT_STATUS.md) and
+[frozen benchmark contract](docs/VNEXT_BENCHMARK_CONTRACT.md) for coverage,
+validation, and the conditions required before any production cutover.
+
 ## What It Is
 
 This project provides a read-only interface to a private ChatGPT data export. The raw export is preserved unchanged. Derived databases and semantic indexes are derivative; they can always be rebuilt.
