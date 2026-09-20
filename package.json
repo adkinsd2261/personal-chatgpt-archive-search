@@ -1,0 +1,9 @@
+{
+  "name": "crowley-archive-vnext-foundation",
+  "private": true,
+  "type": "module",
+  "engines": {"node": ">=22"},
+  "scripts": {"test": "node --test tests/vnext/*.test.mjs"},
+  "dependencies": {"@huggingface/tokenizers": "0.2.0", "postgres": "3.4.9"},
+  "devDependencies": {"supabase": "2.117.0"}
+}
